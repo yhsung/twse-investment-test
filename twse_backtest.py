@@ -309,6 +309,7 @@ def run_strategy(
     top_n: int = 5,
     use_regime: bool = True,
     use_defensive_etfs: bool = True,
+    transaction_cost_rate: float = 0.0,
 ) -> Result:
     px = prices.copy()
     returns = px.pct_change(fill_method=None).replace([np.inf, -np.inf], np.nan).fillna(0.0)
@@ -385,7 +386,8 @@ def run_strategy(
 
     weights = weights.ffill().fillna(0.0)
     shifted = weights.shift(1).fillna(0.0)
-    strat_ret = (shifted * returns).sum(axis=1)
+    turnover = weights.diff().abs().sum(axis=1).fillna(0.0)
+    strat_ret = (shifted * returns).sum(axis=1) - turnover * transaction_cost_rate
     equity = (1 + strat_ret).cumprod()
     return Result(name=name, equity=equity, weights=weights)
 
@@ -417,6 +419,36 @@ def markdown_table(df: pd.DataFrame, index: bool = False) -> str:
     return "\n".join(lines)
 
 
+def segment_summary(results: list[Result]) -> pd.DataFrame:
+    segments = [
+        ("2018-2020", "2018-01-02", "2020-12-31"),
+        ("2021-2022", "2021-01-01", "2022-12-31"),
+        ("2023-2026", "2023-01-01", "2026-04-17"),
+    ]
+    rows = []
+    for result in results:
+        eq = result.equity.dropna()
+        for label, start, end in segments:
+            part = eq.loc[(eq.index >= pd.Timestamp(start)) & (eq.index <= pd.Timestamp(end))]
+            if len(part) < 2:
+                continue
+            rows.append(
+                {
+                    "策略": result.name,
+                    "區間": label,
+                    "區間報酬": part.iloc[-1] / part.iloc[0] - 1,
+                    "最大回撤": max_drawdown(part / part.iloc[0]),
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def latest_positions(result: Result, n: int = 12) -> pd.DataFrame:
+    latest = result.weights.iloc[-1]
+    latest = latest[latest > 0].sort_values(ascending=False).head(n)
+    return latest.rename("權重").to_frame()
+
+
 def write_report(prices: pd.DataFrame, results: list[Result]) -> None:
     summaries = [summarize(r) for r in results]
     df = pd.DataFrame(summaries)
@@ -424,10 +456,11 @@ def write_report(prices: pd.DataFrame, results: list[Result]) -> None:
     df = df[order_cols]
 
     md = []
-    md.append("# TWSE 策略第一輪回測報告\n")
+    md.append("# TWSE 策略第二輪回測報告\n")
     md.append(f"產生時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-    md.append("資料來源：FinMind TaiwanStockPrice 日線 API；原本嘗試 TWSE 官方日線 API，但大量抓取時受 CDN/security redirect 影響，因此改用 FinMind 做第一輪可重複回測。此輪使用價格報酬，尚未納入股息再投入、交易稅、手續費與滑價。\n")
+    md.append("資料來源：FinMind TaiwanStockPrice 日線 API；原本嘗試 TWSE 官方日線 API，但大量抓取時受 CDN/security redirect 影響，因此改用 FinMind 做可重複回測。本輪仍使用價格報酬，尚未納入股息再投入。\n")
     md.append("重要限制：價格資料不是完整總報酬資料；ETF 與個股配息會使買進持有與策略報酬被低估。00631L 已依已知 2026 年 22:1 分割做簡易回溯調整，其他明顯分割跳點以演算法簡易回溯調整。\n")
+    md.append("第二輪新增：部分策略加入粗略交易成本壓力測試，假設每 1.00 換手成本 0.20%。此成本只是保守近似，尚未拆分股票與 ETF 的手續費、證交稅與滑價。\n")
     md.append("## 結果摘要\n")
 
     table = df.copy()
@@ -442,13 +475,31 @@ def write_report(prices: pd.DataFrame, results: list[Result]) -> None:
     best_dd = df.sort_values("最大回撤", ascending=False).iloc[0]
     md.append(f"- 年化報酬最高：{best_cagr['策略']}，年化 {format_pct(best_cagr['年化報酬'])}，最大回撤 {format_pct(best_cagr['最大回撤'])}。\n")
     md.append(f"- 最大回撤最小：{best_dd['策略']}，最大回撤 {format_pct(best_dd['最大回撤'])}，年化 {format_pct(best_dd['年化報酬'])}。\n")
-    md.append("- 本輪只是價格回測，不能直接當作投資建議；下一輪必須納入總報酬、成本、稅負與月營收基本面濾網。\n")
+    md.append("- 本輪仍只是研究回測，不能直接當作投資建議；下一輪必須納入總報酬、月營收基本面濾網與更細的股票/ETF 成本模型。\n")
+
+    seg = segment_summary(results)
+    if not seg.empty:
+        md.append("\n## 分段回測\n")
+        seg_table = seg.copy()
+        seg_table["區間報酬"] = seg_table["區間報酬"].map(format_pct)
+        seg_table["最大回撤"] = seg_table["最大回撤"].map(format_pct)
+        md.append(markdown_table(seg_table, index=False))
 
     md.append("\n## 本輪保留策略\n")
     md.append("- 優先保留 `標準版現金防守 50/35/10`：本輪在年化報酬仍高於 20% 的同時，最大回撤最低。\n")
+    md.append("- 若加入粗略交易成本後仍高於 20%，才允許升級為主策略；否則降為候選。\n")
     md.append("- 保留 `標準版無槓桿 55/35/0`：確認不依賴 00631L 也能超過台灣 50，但仍需加入交易成本。\n")
     md.append("- 保留 `標準版 50/35/10` 作為主策略候選，但需限制 00631L 觸發條件。\n")
     md.append("- `進取版 40/40/15` 與 `無狀態濾網 50/35/10` 暫列研究候選，不列為預設策略，避免過度貼合 2018-2026 AI 強週期。\n")
+
+    selected = next((r for r in results if r.name == "標準版現金防守 50/35/10（成本0.20%）"), None)
+    if selected is None:
+        selected = next((r for r in results if r.name == "標準版現金防守 50/35/10"), None)
+    if selected is not None:
+        md.append("\n## 目前主策略最新權重\n")
+        pos = latest_positions(selected)
+        pos["權重"] = pos["權重"].map(format_pct)
+        md.append(markdown_table(pos, index=True))
 
     md.append("\n## 資料完整性\n")
     coverage = prices.notna().sum().sort_values(ascending=False)
@@ -481,6 +532,8 @@ def main() -> None:
             run_strategy(bt_prices, "標準版 50/35/10", 0.50, 0.35, 0.10, 0.05, top_n=5, use_regime=True),
             run_strategy(bt_prices, "標準版無槓桿 55/35/0", 0.55, 0.35, 0.00, 0.10, top_n=5, use_regime=True),
             run_strategy(bt_prices, "標準版現金防守 50/35/10", 0.50, 0.35, 0.10, 0.05, top_n=5, use_regime=True, use_defensive_etfs=False),
+            run_strategy(bt_prices, "標準版現金防守 50/35/10（成本0.20%）", 0.50, 0.35, 0.10, 0.05, top_n=5, use_regime=True, use_defensive_etfs=False, transaction_cost_rate=0.002),
+            run_strategy(bt_prices, "標準版無槓桿 55/35/0（成本0.20%）", 0.55, 0.35, 0.00, 0.10, top_n=5, use_regime=True, transaction_cost_rate=0.002),
             run_strategy(bt_prices, "Top3集中 50/35/10", 0.50, 0.35, 0.10, 0.05, top_n=3, use_regime=True),
             run_strategy(bt_prices, "進取版 40/40/15", 0.40, 0.40, 0.15, 0.05, top_n=5, use_regime=True),
             run_strategy(bt_prices, "無狀態濾網 50/35/10", 0.50, 0.35, 0.10, 0.05, top_n=5, use_regime=False),
