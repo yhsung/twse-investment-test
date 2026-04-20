@@ -146,6 +146,11 @@ def parse_ticker_finmind(ticker: str) -> pd.DataFrame:
     if cache.exists():
         try:
             payload = json.loads(cache.read_text())
+            data = payload.get("data", []) if isinstance(payload, dict) else []
+            if data:
+                latest_cached = max(row.get("date", "") for row in data)
+                if latest_cached < END_DATE:
+                    payload = None
         except Exception:
             cache.unlink(missing_ok=True)
             payload = None
