@@ -310,13 +310,15 @@ def run_strategy(
     use_regime: bool = True,
     use_defensive_etfs: bool = True,
     transaction_cost_rate: float = 0.0,
+    core_ticker: str = "0050",
 ) -> Result:
     px = prices.copy()
     returns = px.pct_change(fill_method=None).replace([np.inf, -np.inf], np.nan).fillna(0.0)
-    ma200 = px["0050"].rolling(200).mean()
+    regime_ticker = "0050"
+    ma200 = px[regime_ticker].rolling(200).mean()
     ma120 = px.rolling(120).mean()
-    ma60 = px["0050"].rolling(60).mean()
-    ma20 = px["0050"].rolling(20).mean()
+    ma60 = px[regime_ticker].rolling(60).mean()
+    ma20 = px[regime_ticker].rolling(20).mean()
 
     rebal_dates = set(monthly_rebalance_dates(px))
     weights = pd.DataFrame(0.0, index=px.index, columns=px.columns)
@@ -325,20 +327,21 @@ def run_strategy(
     for dt in px.index:
         if dt in rebal_dates:
             current[:] = 0.0
-            risk_on = bool(px.loc[dt, "0050"] > ma200.loc[dt]) if not np.isnan(ma200.loc[dt]) else False
+            risk_on = bool(px.loc[dt, regime_ticker] > ma200.loc[dt]) if not np.isnan(ma200.loc[dt]) else False
             strong = (
                 risk_on
                 and not np.isnan(ma20.loc[dt])
                 and not np.isnan(ma60.loc[dt])
                 and ma20.loc[dt] > ma60.loc[dt]
-                and px["0050"].pct_change(63).loc[dt] > 0
+                and px[regime_ticker].pct_change(63).loc[dt] > 0
             )
 
             if not use_regime:
                 risk_on = True
                 strong = True
 
-            core_ticker = "0050"
+            if core_ticker not in current.index or np.isnan(px.loc[dt, core_ticker]):
+                core_ticker = "0050"
             if risk_on:
                 current[core_ticker] = core_weight
                 ai_alloc = ai_weight
@@ -449,6 +452,22 @@ def latest_positions(result: Result, n: int = 12) -> pd.DataFrame:
     return latest.rename("權重").to_frame()
 
 
+def export_monthly_holdings(result: Result) -> None:
+    rows = []
+    dates = monthly_rebalance_dates(result.weights)
+    for dt in dates:
+        if dt not in result.weights.index:
+            continue
+        weights = result.weights.loc[dt]
+        invested = float(weights.sum())
+        cash = max(0.0, 1.0 - invested)
+        for ticker, weight in weights[weights > 0].sort_values(ascending=False).items():
+            rows.append({"date": dt.date().isoformat(), "ticker": ticker, "weight": weight})
+        if cash > 0:
+            rows.append({"date": dt.date().isoformat(), "ticker": "CASH", "weight": cash})
+    pd.DataFrame(rows).to_csv(ROOT / "twse_monthly_holdings.csv", index=False)
+
+
 def write_report(prices: pd.DataFrame, results: list[Result]) -> None:
     summaries = [summarize(r) for r in results]
     df = pd.DataFrame(summaries)
@@ -492,10 +511,13 @@ def write_report(prices: pd.DataFrame, results: list[Result]) -> None:
     md.append("- 保留 `標準版 50/35/10` 作為主策略候選，但需限制 00631L 觸發條件。\n")
     md.append("- `進取版 40/40/15` 與 `無狀態濾網 50/35/10` 暫列研究候選，不列為預設策略，避免過度貼合 2018-2026 AI 強週期。\n")
 
-    selected = next((r for r in results if r.name == "標準版現金防守 50/35/10（成本0.20%）"), None)
+    selected = next((r for r in results if r.name == "006208核心現金防守 50/35/10（成本0.20%）"), None)
+    if selected is None:
+        selected = next((r for r in results if r.name == "標準版現金防守 50/35/10（成本0.20%）"), None)
     if selected is None:
         selected = next((r for r in results if r.name == "標準版現金防守 50/35/10"), None)
     if selected is not None:
+        export_monthly_holdings(selected)
         md.append("\n## 目前主策略最新權重\n")
         pos = latest_positions(selected)
         pos["權重"] = pos["權重"].map(format_pct)
@@ -533,6 +555,7 @@ def main() -> None:
             run_strategy(bt_prices, "標準版無槓桿 55/35/0", 0.55, 0.35, 0.00, 0.10, top_n=5, use_regime=True),
             run_strategy(bt_prices, "標準版現金防守 50/35/10", 0.50, 0.35, 0.10, 0.05, top_n=5, use_regime=True, use_defensive_etfs=False),
             run_strategy(bt_prices, "標準版現金防守 50/35/10（成本0.20%）", 0.50, 0.35, 0.10, 0.05, top_n=5, use_regime=True, use_defensive_etfs=False, transaction_cost_rate=0.002),
+            run_strategy(bt_prices, "006208核心現金防守 50/35/10（成本0.20%）", 0.50, 0.35, 0.10, 0.05, top_n=5, use_regime=True, use_defensive_etfs=False, transaction_cost_rate=0.002, core_ticker="006208"),
             run_strategy(bt_prices, "標準版無槓桿 55/35/0（成本0.20%）", 0.55, 0.35, 0.00, 0.10, top_n=5, use_regime=True, transaction_cost_rate=0.002),
             run_strategy(bt_prices, "Top3集中 50/35/10", 0.50, 0.35, 0.10, 0.05, top_n=3, use_regime=True),
             run_strategy(bt_prices, "進取版 40/40/15", 0.40, 0.40, 0.15, 0.05, top_n=5, use_regime=True),
