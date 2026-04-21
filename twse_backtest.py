@@ -17,11 +17,12 @@ DATA_DIR = ROOT / "data" / "twse"
 FINMIND_DIR = ROOT / "data" / "finmind"
 REPORT_PATH = ROOT / "twse_backtest_report.md"
 
+TODAY = date.today()
 START_YEAR = 2018
-END_YEAR = 2026
-END_MONTH = 4
+END_YEAR = TODAY.year
+END_MONTH = TODAY.month
 START_DATE = "2018-01-01"
-END_DATE = "2026-04-20"
+END_DATE = TODAY.isoformat()
 
 CORE = ["0050", "006208"]
 LEVERAGED = ["00631L"]
@@ -143,6 +144,11 @@ def parse_ticker(ticker: str) -> pd.DataFrame:
 def parse_ticker_finmind(ticker: str) -> pd.DataFrame:
     FINMIND_DIR.mkdir(parents=True, exist_ok=True)
     cache = FINMIND_DIR / f"{ticker}_{START_DATE}_{END_DATE}.json"
+    payload = None
+    stale_payload = None
+    legacy_caches = sorted(FINMIND_DIR.glob(f"{ticker}_{START_DATE}_*.json"))
+    if not cache.exists() and legacy_caches:
+        cache = legacy_caches[-1]
     if cache.exists():
         try:
             payload = json.loads(cache.read_text())
@@ -150,35 +156,40 @@ def parse_ticker_finmind(ticker: str) -> pd.DataFrame:
             if data:
                 latest_cached = max(row.get("date", "") for row in data)
                 if latest_cached < END_DATE:
+                    stale_payload = payload
                     payload = None
         except Exception:
             cache.unlink(missing_ok=True)
             payload = None
-    else:
-        payload = None
     if payload is None:
         url = (
             "https://api.finmindtrade.com/api/v4/data"
             f"?dataset=TaiwanStockPrice&data_id={ticker}"
             f"&start_date={START_DATE}&end_date={END_DATE}"
         )
-        proc = subprocess.run(
-            [
-                "curl",
-                "-sL",
-                "--max-time",
-                "60",
-                "-A",
-                "Mozilla/5.0",
-                url,
-            ],
-            check=True,
-            text=True,
-            capture_output=True,
-        )
-        payload = json.loads(proc.stdout)
-        cache.write_text(json.dumps(payload, ensure_ascii=False))
-        time.sleep(0.5)
+        try:
+            proc = subprocess.run(
+                [
+                    "curl",
+                    "-sL",
+                    "--max-time",
+                    "60",
+                    "-A",
+                    "Mozilla/5.0",
+                    url,
+                ],
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+            payload = json.loads(proc.stdout)
+            cache.write_text(json.dumps(payload, ensure_ascii=False))
+            time.sleep(0.5)
+        except Exception:
+            if stale_payload is not None:
+                payload = stale_payload
+            else:
+                return pd.DataFrame()
 
     if payload.get("status") != 200 or not payload.get("data"):
         return pd.DataFrame()
@@ -431,7 +442,7 @@ def segment_summary(results: list[Result]) -> pd.DataFrame:
     segments = [
         ("2018-2020", "2018-01-02", "2020-12-31"),
         ("2021-2022", "2021-01-01", "2022-12-31"),
-        ("2023-2026", "2023-01-01", "2026-04-17"),
+        ("2023-至今", "2023-01-01", END_DATE),
     ]
     rows = []
     for result in results:
@@ -455,6 +466,55 @@ def latest_positions(result: Result, n: int = 12) -> pd.DataFrame:
     latest = result.weights.iloc[-1]
     latest = latest[latest > 0].sort_values(ascending=False).head(n)
     return latest.rename("權重").to_frame()
+
+
+def latest_market_snapshot(prices: pd.DataFrame) -> dict[str, float | bool | str]:
+    dt = prices.index[-1]
+    regime = prices["0050"]
+    ma20 = regime.rolling(20).mean().loc[dt]
+    ma60 = regime.rolling(60).mean().loc[dt]
+    ma200 = regime.rolling(200).mean().loc[dt]
+    return {
+        "資料截止日": str(dt.date()),
+        "0050收盤": float(prices.loc[dt, "0050"]),
+        "006208收盤": float(prices.loc[dt, "006208"]) if "006208" in prices.columns else math.nan,
+        "00631L收盤": float(prices.loc[dt, "00631L"]) if "00631L" in prices.columns else math.nan,
+        "0050高於20日": bool(prices.loc[dt, "0050"] > ma20) if not np.isnan(ma20) else False,
+        "0050高於60日": bool(prices.loc[dt, "0050"] > ma60) if not np.isnan(ma60) else False,
+        "0050高於200日": bool(prices.loc[dt, "0050"] > ma200) if not np.isnan(ma200) else False,
+        "20日高於60日": bool(ma20 > ma60) if not np.isnan(ma20) and not np.isnan(ma60) else False,
+        "0050三個月動能": float(regime.pct_change(63).loc[dt]),
+    }
+
+
+def latest_ai_ranking(prices: pd.DataFrame, top_n: int = 10) -> pd.DataFrame:
+    dt = prices.index[-1]
+    ma120 = prices.rolling(120).mean()
+    rows = []
+    for ticker in AI_UNIVERSE:
+        if ticker not in prices.columns or np.isnan(prices.loc[dt, ticker]):
+            continue
+        close = prices.loc[dt, ticker]
+        mom3 = prices[ticker].pct_change(63).loc[dt]
+        mom6 = prices[ticker].pct_change(126).loc[dt]
+        trend_ok = close > ma120[ticker].loc[dt] if not np.isnan(ma120[ticker].loc[dt]) else True
+        score = 0.65 * mom6 + 0.35 * mom3 if trend_ok and not np.isnan(mom3) and not np.isnan(mom6) else math.nan
+        peak_63 = prices[ticker].loc[:dt].tail(63).max()
+        peak_252 = prices[ticker].loc[:dt].tail(252).max()
+        rows.append(
+            {
+                "代號": ticker,
+                "收盤": float(close),
+                "3個月動能": mom3,
+                "6個月動能": mom6,
+                "分數": score,
+                "120日上方": trend_ok,
+                "近3月回撤": close / peak_63 - 1 if peak_63 else math.nan,
+                "近12月回撤": close / peak_252 - 1 if peak_252 else math.nan,
+            }
+        )
+    ranked = pd.DataFrame(rows).sort_values("分數", ascending=False)
+    return ranked.head(top_n)
 
 
 def export_monthly_holdings(result: Result) -> None:
@@ -485,6 +545,25 @@ def write_report(prices: pd.DataFrame, results: list[Result]) -> None:
     md.append("資料來源：FinMind TaiwanStockPrice 日線 API；原本嘗試 TWSE 官方日線 API，但大量抓取時受 CDN/security redirect 影響，因此改用 FinMind 做可重複回測。本輪仍使用價格報酬，尚未納入股息再投入。\n")
     md.append("重要限制：價格資料不是完整總報酬資料；ETF 與個股配息會使買進持有與策略報酬被低估。00631L 已依已知 2026 年 22:1 分割做簡易回溯調整，其他明顯分割跳點以演算法簡易回溯調整。\n")
     md.append("第二輪新增：部分策略加入粗略交易成本壓力測試，假設每 1.00 換手成本 0.20%。此成本只是保守近似，尚未拆分股票與 ETF 的手續費、證交稅與滑價。\n")
+    md.append(f"本次執行日：{TODAY.isoformat()}；實際可回測價格資料截止日：{prices.index[-1].date()}。\n")
+    md.append("若當日盤中資料尚未寫入本地快取，本報告的市場狀態與回測訊號仍以最近一個可用收盤日為準。\n")
+
+    snapshot = latest_market_snapshot(prices)
+    snap_df = pd.DataFrame(
+        [
+            {"指標": key, "數值": format_pct(value) if isinstance(value, float) and "動能" in key else value}
+            for key, value in snapshot.items()
+        ]
+    )
+    md.append("## 最新市場狀態\n")
+    md.append(markdown_table(snap_df, index=False))
+
+    ai_rank = latest_ai_ranking(prices)
+    ai_table = ai_rank.copy()
+    for col in ["3個月動能", "6個月動能", "分數", "近3月回撤", "近12月回撤"]:
+        ai_table[col] = ai_table[col].map(format_pct)
+    md.append("\n## 最新 AI 候選池排名\n")
+    md.append(markdown_table(ai_table, index=False))
     md.append("## 結果摘要\n")
 
     table = df.copy()
