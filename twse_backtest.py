@@ -147,11 +147,12 @@ def parse_ticker_finmind(ticker: str) -> pd.DataFrame:
     payload = None
     stale_payload = None
     legacy_caches = sorted(FINMIND_DIR.glob(f"{ticker}_{START_DATE}_*.json"))
-    if not cache.exists() and legacy_caches:
-        cache = legacy_caches[-1]
-    if cache.exists():
+    read_cache = cache
+    if not read_cache.exists() and legacy_caches:
+        read_cache = legacy_caches[-1]
+    if read_cache.exists():
         try:
-            payload = json.loads(cache.read_text())
+            payload = json.loads(read_cache.read_text())
             data = payload.get("data", []) if isinstance(payload, dict) else []
             if data:
                 latest_cached = max(row.get("date", "") for row in data)
@@ -159,7 +160,7 @@ def parse_ticker_finmind(ticker: str) -> pd.DataFrame:
                     stale_payload = payload
                     payload = None
         except Exception:
-            cache.unlink(missing_ok=True)
+            read_cache.unlink(missing_ok=True)
             payload = None
     if payload is None:
         url = (
