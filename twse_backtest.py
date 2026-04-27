@@ -589,18 +589,20 @@ def write_report(prices: pd.DataFrame, results: list[Result]) -> None:
         seg_table["最大回撤"] = seg_table["最大回撤"].map(format_pct)
         md.append(markdown_table(seg_table, index=False))
 
-    md.append("\n## 本輪保留策略\n")
-    md.append("- 優先保留 `標準版現金防守 50/35/10`：本輪在年化報酬仍高於 20% 的同時，最大回撤最低。\n")
-    md.append("- 若加入粗略交易成本後仍高於 20%，才允許升級為主策略；否則降為候選。\n")
-    md.append("- 保留 `標準版無槓桿 55/35/0`：確認不依賴 00631L 也能超過台灣 50，但仍需加入交易成本。\n")
-    md.append("- 保留 `標準版 50/35/10` 作為主策略候選，但需限制 00631L 觸發條件。\n")
-    md.append("- `進取版 40/40/15` 與 `無狀態濾網 50/35/10` 暫列研究候選，不列為預設策略，避免過度貼合 2018-2026 AI 強週期。\n")
-
     selected = next((r for r in results if r.name == "006208核心現金防守 50/35/10（成本0.20%）"), None)
     if selected is None:
         selected = next((r for r in results if r.name == "標準版現金防守 50/35/10（成本0.20%）"), None)
     if selected is None:
         selected = next((r for r in results if r.name == "標準版現金防守 50/35/10"), None)
+    primary_name = selected.name if selected is not None else str(best_dd["策略"])
+
+    md.append("\n## 本輪保留策略\n")
+    md.append(f"- 優先保留 `{primary_name}`：本輪在年化報酬仍高於 20% 的同時，最大回撤最低。\n")
+    md.append("- 若加入粗略交易成本後仍高於 20%，才允許升級為主策略；否則降為候選。\n")
+    md.append("- 保留 `標準版無槓桿 55/35/0`：確認不依賴 00631L 也能超過台灣 50，但仍需加入交易成本。\n")
+    md.append("- 保留 `標準版 50/35/10` 作為主策略候選，但需限制 00631L 觸發條件。\n")
+    md.append("- `進取版 40/40/15` 與 `無狀態濾網 50/35/10` 暫列研究候選，不列為預設策略，避免過度貼合 2018-2026 AI 強週期。\n")
+
     if selected is not None:
         export_monthly_holdings(selected)
         md.append("\n## 目前主策略最新權重\n")
