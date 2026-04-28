@@ -1,6 +1,6 @@
 # TWSE 策略第二輪回測報告
 
-產生時間：2026-04-28 10:26:47
+產生時間：2026-04-28 13:46:06
 
 資料來源：FinMind TaiwanStockPrice 日線 API；原本嘗試 TWSE 官方日線 API，但大量抓取時受 CDN/security redirect 影響，因此改用 FinMind 做可重複回測。本輪仍使用價格報酬，尚未納入股息再投入。
 
