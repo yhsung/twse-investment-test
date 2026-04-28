@@ -476,7 +476,9 @@ def latest_market_snapshot(prices: pd.DataFrame) -> dict[str, float | bool | str
     ma60 = regime.rolling(60).mean().loc[dt]
     ma200 = regime.rolling(200).mean().loc[dt]
     return {
+        "執行日": TODAY.isoformat(),
         "資料截止日": str(dt.date()),
+        "資料滯後日曆天數": str((TODAY - dt.date()).days),
         "0050收盤": float(prices.loc[dt, "0050"]),
         "006208收盤": float(prices.loc[dt, "006208"]) if "006208" in prices.columns else math.nan,
         "00631L收盤": float(prices.loc[dt, "00631L"]) if "00631L" in prices.columns else math.nan,
@@ -548,6 +550,9 @@ def write_report(prices: pd.DataFrame, results: list[Result]) -> None:
     md.append("第二輪新增：部分策略加入粗略交易成本壓力測試，假設每 1.00 換手成本 0.20%。此成本只是保守近似，尚未拆分股票與 ETF 的手續費、證交稅與滑價。\n")
     md.append(f"本次執行日：{TODAY.isoformat()}；實際可回測價格資料截止日：{prices.index[-1].date()}。\n")
     md.append("若當日盤中資料尚未寫入本地快取，本報告的市場狀態與回測訊號仍以最近一個可用收盤日為準。\n")
+    lag_days = (TODAY - prices.index[-1].date()).days
+    if lag_days > 0:
+        md.append(f"資料新鮮度警示：本輪執行日與最新收盤資料相差 {lag_days} 個日曆天；若外部資料源延遲，檔名或執行時間不代表已取得更新日線。\n")
 
     snapshot = latest_market_snapshot(prices)
     snap_df = pd.DataFrame(
