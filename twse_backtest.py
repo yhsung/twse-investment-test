@@ -143,11 +143,10 @@ def parse_ticker(ticker: str) -> pd.DataFrame:
 
 def parse_ticker_finmind(ticker: str) -> pd.DataFrame:
     FINMIND_DIR.mkdir(parents=True, exist_ok=True)
-    cache = FINMIND_DIR / f"{ticker}_{START_DATE}_{END_DATE}.json"
     payload = None
     stale_payload = None
     legacy_caches = sorted(FINMIND_DIR.glob(f"{ticker}_{START_DATE}_*.json"))
-    read_cache = cache
+    read_cache = legacy_caches[-1] if legacy_caches else FINMIND_DIR / f"{ticker}_{START_DATE}_{END_DATE}.json"
     if not read_cache.exists() and legacy_caches:
         read_cache = legacy_caches[-1]
     if read_cache.exists():
@@ -184,6 +183,10 @@ def parse_ticker_finmind(ticker: str) -> pd.DataFrame:
                 capture_output=True,
             )
             payload = json.loads(proc.stdout)
+            actual_end_date = END_DATE
+            if isinstance(payload, dict) and payload.get("data"):
+                actual_end_date = max(row.get("date", END_DATE) for row in payload["data"])
+            cache = FINMIND_DIR / f"{ticker}_{START_DATE}_{actual_end_date}.json"
             cache.write_text(json.dumps(payload, ensure_ascii=False))
             time.sleep(0.5)
         except Exception:
