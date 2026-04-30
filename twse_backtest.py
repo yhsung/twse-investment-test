@@ -493,6 +493,28 @@ def latest_market_snapshot(prices: pd.DataFrame) -> dict[str, float | bool | str
     }
 
 
+def latest_signal_freshness(prices: pd.DataFrame, tickers: list[str]) -> pd.DataFrame:
+    rows = []
+    market_dt = prices.index[-1]
+    for ticker in tickers:
+        if ticker not in prices.columns:
+            continue
+        series = prices[ticker].dropna()
+        if series.empty:
+            continue
+        last_dt = series.index[-1]
+        rows.append(
+            {
+                "代號": ticker,
+                "最後有效收盤日": str(last_dt.date()),
+                "距執行日日曆天數": (TODAY - last_dt.date()).days,
+                "最新有效收盤": float(series.iloc[-1]),
+                "是否等於市場截止日": bool(last_dt == market_dt),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 def latest_ai_ranking(prices: pd.DataFrame, top_n: int = 10) -> pd.DataFrame:
     dt = prices.index[-1]
     ma120 = prices.rolling(120).mean()
@@ -556,6 +578,7 @@ def write_report(prices: pd.DataFrame, results: list[Result]) -> None:
     lag_days = (TODAY - prices.index[-1].date()).days
     if lag_days > 0:
         md.append(f"資料新鮮度警示：本輪執行日與最新收盤資料相差 {lag_days} 個日曆天；若外部資料源延遲，檔名或執行時間不代表已取得更新日線。\n")
+        md.append("正式權重與風控判讀應以核心訊號（0050、006208、00631L）的最後有效收盤日為準，而不是以快取檔名或請求的 end_date 推斷。\n")
 
     snapshot = latest_market_snapshot(prices)
     snap_df = pd.DataFrame(
@@ -566,6 +589,11 @@ def write_report(prices: pd.DataFrame, results: list[Result]) -> None:
     )
     md.append("## 最新市場狀態\n")
     md.append(markdown_table(snap_df, index=False))
+
+    freshness = latest_signal_freshness(prices, ["0050", "006208", "00631L"])
+    if not freshness.empty:
+        md.append("\n## 核心訊號新鮮度\n")
+        md.append(markdown_table(freshness, index=False))
 
     ai_rank = latest_ai_ranking(prices)
     ai_table = ai_rank.copy()
