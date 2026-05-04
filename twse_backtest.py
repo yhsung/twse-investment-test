@@ -40,6 +40,7 @@ AI_UNIVERSE = [
 ]
 DEFENSIVE = ["0056", "00878", "00919"]
 TICKERS = sorted(set(CORE + LEVERAGED + AI_UNIVERSE + DEFENSIVE))
+STALE_DATA_CALENDAR_DAYS = 5
 
 
 def month_iter() -> list[tuple[int, int]]:
@@ -478,10 +479,12 @@ def latest_market_snapshot(prices: pd.DataFrame) -> dict[str, float | bool | str
     ma20 = regime.rolling(20).mean().loc[dt]
     ma60 = regime.rolling(60).mean().loc[dt]
     ma200 = regime.rolling(200).mean().loc[dt]
+    lag_days = (TODAY - dt.date()).days
     return {
         "執行日": TODAY.isoformat(),
         "資料截止日": str(dt.date()),
-        "資料滯後日曆天數": str((TODAY - dt.date()).days),
+        "資料滯後日曆天數": str(lag_days),
+        "資料模式": "monitor-only" if lag_days >= STALE_DATA_CALENDAR_DAYS else "signal-eligible",
         "0050收盤": float(prices.loc[dt, "0050"]),
         "006208收盤": float(prices.loc[dt, "006208"]) if "006208" in prices.columns else math.nan,
         "00631L收盤": float(prices.loc[dt, "00631L"]) if "00631L" in prices.columns else math.nan,
@@ -579,6 +582,8 @@ def write_report(prices: pd.DataFrame, results: list[Result]) -> None:
     if lag_days > 0:
         md.append(f"資料新鮮度警示：本輪執行日與最新收盤資料相差 {lag_days} 個日曆天；若外部資料源延遲，檔名或執行時間不代表已取得更新日線。\n")
         md.append("正式權重與風控判讀應以核心訊號（0050、006208、00631L）的最後有效收盤日為準，而不是以快取檔名或請求的 end_date 推斷。\n")
+    if lag_days >= STALE_DATA_CALENDAR_DAYS:
+        md.append(f"資料治理升級：當核心訊號滯後達 {STALE_DATA_CALENDAR_DAYS} 個日曆天以上時，策略自動進入 `monitor-only` 模式；在本地可驗證日線恢復前，只允許重跑回測、檢查風控與記錄觀察，不允許翻轉 `risk-on/risk-off`、重排 AI 候選池或調整 `00631L` 權重。\n")
 
     snapshot = latest_market_snapshot(prices)
     snap_df = pd.DataFrame(
