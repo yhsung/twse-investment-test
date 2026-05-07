@@ -41,6 +41,8 @@ AI_UNIVERSE = [
 DEFENSIVE = ["0056", "00878", "00919"]
 TICKERS = sorted(set(CORE + LEVERAGED + AI_UNIVERSE + DEFENSIVE))
 STALE_DATA_CALENDAR_DAYS = 5
+SOURCE_REMEDIATION_LAG_DAYS = 14
+FINMIND_AUDIT_TICKERS = ["0050", "006208", "00631L", "2308", "2330", "2383"]
 
 
 def month_iter() -> list[tuple[int, int]]:
@@ -255,6 +257,65 @@ def load_prices(tickers: list[str]) -> pd.DataFrame:
     prices = pd.DataFrame(frames).sort_index()
     prices = prices.dropna(how="all")
     return prices
+
+
+def parse_cache_end_date(path: Path) -> str:
+    parts = path.stem.split("_")
+    return parts[-1] if parts else ""
+
+
+def finmind_cache_audit(tickers: list[str]) -> pd.DataFrame:
+    rows = []
+    for ticker in tickers:
+        candidates = sorted(FINMIND_DIR.glob(f"{ticker}_{START_DATE}_*.json"))
+        latest = candidates[-1] if candidates else None
+        if latest is None:
+            rows.append(
+                {
+                    "代號": ticker,
+                    "快取檔名": "missing",
+                    "檔名截止日": "n/a",
+                    "payload最後日期": "n/a",
+                    "檔名超前日數": "n/a",
+                    "payload距執行日日曆天數": "n/a",
+                    "狀態": "missing-cache",
+                }
+            )
+            continue
+
+        filename_end = parse_cache_end_date(latest)
+        payload_end = "n/a"
+        drift_days: int | None = None
+        lag_days: int | None = None
+        status = "ok"
+        try:
+            payload = json.loads(latest.read_text())
+            data = payload.get("data", []) if isinstance(payload, dict) else []
+            payload_end = max((row.get("date", "") for row in data), default="n/a")
+            if payload_end != "n/a":
+                lag_days = (TODAY - datetime.strptime(payload_end, "%Y-%m-%d").date()).days
+            if filename_end and payload_end != "n/a":
+                drift_days = (
+                    datetime.strptime(filename_end, "%Y-%m-%d").date()
+                    - datetime.strptime(payload_end, "%Y-%m-%d").date()
+                ).days
+                if drift_days > 0:
+                    status = "filename-ahead"
+        except Exception:
+            status = "unreadable-cache"
+
+        rows.append(
+            {
+                "代號": ticker,
+                "快取檔名": latest.name,
+                "檔名截止日": filename_end or "n/a",
+                "payload最後日期": payload_end,
+                "檔名超前日數": drift_days if drift_days is not None else "n/a",
+                "payload距執行日日曆天數": lag_days if lag_days is not None else "n/a",
+                "狀態": status,
+            }
+        )
+    return pd.DataFrame(rows)
 
 
 @dataclass
@@ -599,6 +660,24 @@ def write_report(prices: pd.DataFrame, results: list[Result]) -> None:
     if not freshness.empty:
         md.append("\n## 核心訊號新鮮度\n")
         md.append(markdown_table(freshness, index=False))
+
+    cache_audit = finmind_cache_audit(FINMIND_AUDIT_TICKERS)
+    if not cache_audit.empty:
+        md.append("\n## FinMind 快取稽核\n")
+        md.append(markdown_table(cache_audit, index=False))
+
+    has_filename_ahead = bool((cache_audit["狀態"] == "filename-ahead").any()) if not cache_audit.empty else False
+    if lag_days >= SOURCE_REMEDIATION_LAG_DAYS or has_filename_ahead:
+        md.append("\n## 資料治理動作\n")
+        md.append(
+            f"- 目前治理狀態：`source-remediation-required`。核心訊號距執行日已落後 `{lag_days}` 個日曆天，且快取檔名可能早於 payload 內容。\n"
+        )
+        md.append(
+            f"- 觸發門檻：核心訊號滯後達 `{SOURCE_REMEDIATION_LAG_DAYS}` 個日曆天，或 `FinMind` 最新快取出現 `filename-ahead`，都不再只做重跑紀錄，必須先修資料來源。\n"
+        )
+        md.append(
+            "- 下一步：先驗證 live API payload 最後日期，再把 `parse_ticker_finmind()` 的新鮮度判斷鎖定在 payload 末日；若上游仍停滯，改接替代日線來源後才允許恢復訊號判讀。\n"
+        )
 
     ai_rank = latest_ai_ranking(prices)
     ai_table = ai_rank.copy()
